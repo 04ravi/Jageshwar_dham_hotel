@@ -6,6 +6,7 @@ import Link from 'next/link';
 import { useHotel } from '@/context/HotelContext';
 import { Room, TaxiRoute, FoodItem, Trek, Booking } from '@/data/mockData';
 import InvoiceModal from '@/components/InvoiceModal';
+import CheckTestReceipt from '@/components/CheckTestReceipt';
 
 export default function AdminDashboard() {
   const router = useRouter();
@@ -460,6 +461,7 @@ export default function AdminDashboard() {
           </button>
         </div>
       </header>
+      {activeTab === 'bookings' && <CheckTestReceipt />}
 
       {/* 2. ADMIN MAIN WORKSPACE */}
       <div className="max-w-7xl mx-auto px-4 sm:px-8 py-8 space-y-8">

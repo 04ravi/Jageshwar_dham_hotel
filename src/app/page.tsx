@@ -1,15 +1,13 @@
 'use client';
 
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useRef } from 'react';
 import Link from 'next/link';
 import { useHotel } from '@/context/HotelContext';
 import { Room, TaxiRoute } from '@/data/mockData';
-import RazorpayModal from '@/components/RazorpayModal';
-import InvoiceModal from '@/components/InvoiceModal';
 import EnquiryModal from '@/components/EnquiryModal';
 
 export default function Home() {
-  const { rooms, taxiRoutes, foodMenu, treks, addBooking, bookings } = useHotel();
+  const { rooms, taxiRoutes, foodMenu, treks } = useHotel();
 
   // Tab State
   const [activeTab, setActiveTab] = useState<'rooms' | 'taxi' | 'food' | 'treks'>('rooms');
@@ -19,8 +17,8 @@ export default function Home() {
   const [distanceFilter, setDistanceFilter] = useState<'ALL' | 'UNDER_200M' | '200_TO_400M' | 'ABOVE_400M'>('ALL');
 
   // Date & Guest Selector State
-  const [checkIn, setCheckIn] = useState('2026-11-20');
-  const [checkOut, setCheckOut] = useState('2026-11-22');
+  const [checkIn, setCheckIn] = useState(() => new Date(Date.now()+86400000).toLocaleDateString('en-CA',{timeZone:'Asia/Kolkata'}));
+  const [checkOut, setCheckOut] = useState(() => new Date(Date.now()+3*86400000).toLocaleDateString('en-CA',{timeZone:'Asia/Kolkata'}));
   const [adults, setAdults] = useState(2);
   const [children, setChildren] = useState(0);
 
@@ -34,15 +32,12 @@ export default function Home() {
   const [guestName, setGuestName] = useState('');
   const [guestEmail, setGuestEmail] = useState('');
   const [guestPhone, setGuestPhone] = useState('');
-  const [idProofFile, setIdProofFile] = useState<string>('');
   const [acceptedRefundPolicy, setAcceptedRefundPolicy] = useState(false);
   const [specialRequests, setSpecialRequests] = useState('');
 
   // Modals
   const [isCheckoutDrawerOpen, setIsCheckoutDrawerOpen] = useState(false);
-  const [isRazorpayOpen, setIsRazorpayOpen] = useState(false);
   const [isEnquiryOpen, setIsEnquiryOpen] = useState(false);
-  const [confirmedBookingId, setConfirmedBookingId] = useState<string | null>(null);
 
   // Nights calculation
   const nights = useMemo(() => {
@@ -89,8 +84,12 @@ export default function Home() {
   // Capacity validation for selected room
   const isCapacityExceeded = selectedRoom ? adults > selectedRoom.capacityAdults : false;
 
-  // Initiate Razorpay
-  const handleProceedToPayment = () => {
+  // Test checkout
+  const [starting,setStarting]=useState(false);
+  const [checkoutError,setCheckoutError]=useState('');
+  const [checkoutUrl,setCheckoutUrl]=useState('');
+  const attempt=useRef<{signature:string;id:string}|null>(null);
+  const handleProceedToPayment = async () => {
     if (!selectedRoom) {
       alert('Please select a room first.');
       return;
@@ -112,10 +111,6 @@ export default function Home() {
       alert('Please enter your email address for the booking receipt.');
       return;
     }
-    if (!idProofFile) {
-      alert('Please upload or select an Identity Proof document (Aadhaar/Passport/Voter ID).');
-      return;
-    }
     if (!acceptedRefundPolicy) {
       alert('Please read and accept the Cancellation & Refund Policy to proceed.');
       return;
@@ -125,64 +120,15 @@ export default function Home() {
       return;
     }
 
-    setIsRazorpayOpen(true);
+    setCheckoutError('');
+    setStarting(true);
+    const positive = (items: Record<string,number>) => Object.fromEntries(Object.entries(items).filter(([,q])=>q>0));
+    const payload = {roomId:selectedRoom.id, checkIn, checkOut, adults, children, name:guestName,email:guestEmail,phone:guestPhone,notes:specialRequests,accepted:acceptedRefundPolicy,taxi:selectedTaxi?{id:selectedTaxi.route.id,vehicle:selectedTaxi.vehicle}:null,food:positive(selectedFood),treks:positive(selectedTreks),displayedAdvance:advanceToken};
+    const signature=JSON.stringify(payload);
+    if(attempt.current?.signature!==signature) attempt.current={signature,id:crypto.randomUUID()};
+    try {const res=await fetch('/api/test-checkout',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...payload,id:attempt.current.id})}); const result=await res.json();if(!res.ok||!result.url)throw Error(result.error||'Unable to start checkout.');setCheckoutUrl(result.url);}
+    catch(error){setCheckoutError(error instanceof Error?error.message:'Could not start checkout. Please retry.');} finally{setStarting(false);}
   };
-
-  // Payment Success Handler
-  const handlePaymentSuccess = (paymentMethod: 'RAZORPAY_UPI' | 'RAZORPAY_CARD' | 'NETBANKING') => {
-    setIsRazorpayOpen(false);
-
-    // Format food & trek items
-    const foodList = Object.entries(selectedFood)
-      .filter(([, qty]) => qty > 0)
-      .map(([id, quantity]) => {
-        const item = foodMenu.find((f) => f.id === id)!;
-        return { item, quantity };
-      });
-
-    const trekList = Object.entries(selectedTreks)
-      .filter(([, qty]) => qty > 0)
-      .map(([id, participants]) => {
-        const trek = treks.find((t) => t.id === id)!;
-        return { trek, participants };
-      });
-
-    // Create Booking
-    const newBooking = addBooking({
-      source: 'ONLINE_GUEST',
-      guestName,
-      guestEmail,
-      guestPhone,
-      idProofName: idProofFile,
-      checkIn,
-      checkOut,
-      nights,
-      adults,
-      children,
-      room: selectedRoom!,
-      taxi: selectedTaxi || undefined,
-      foodItems: foodList.length > 0 ? foodList : undefined,
-      treks: trekList.length > 0 ? trekList : undefined,
-      roomAmount: roomTotal,
-      taxiAmount: taxiTotal,
-      foodAmount: foodTotal,
-      trekAmount: trekTotal,
-      subtotal,
-      gstAmount,
-      totalAmount: grandTotal,
-      advancePaid: advanceToken,
-      balanceDue: grandTotal - advanceToken,
-      paymentStatus: 'ADVANCE_30_PAID',
-      paymentMethod,
-      bookingStatus: 'CONFIRMED',
-      acceptedRefundPolicy,
-      specialRequests
-    });
-
-    setConfirmedBookingId(newBooking.id);
-  };
-
-  const confirmedBooking = bookings.find((b) => b.id === confirmedBookingId);
 
   return (
     <div className="min-h-screen bg-[#FAF8F5] text-stone-900 font-sans selection:bg-amber-100 selection:text-emerald-950">
@@ -937,29 +883,6 @@ export default function Home() {
                   </div>
                 </div>
 
-                {/* IDENTITY PROOF UPLOAD */}
-                <div>
-                  <label className="block text-[11px] font-bold text-stone-700 mb-1">
-                    Upload Government ID Proof * (Aadhaar / Passport / Voter ID)
-                  </label>
-                  <div className="flex items-center gap-3">
-                    <input
-                      type="file"
-                      id="guest-id-proof"
-                      onChange={(e) => {
-                        const file = e.target.files?.[0];
-                        if (file) setIdProofFile(file.name);
-                      }}
-                      className="text-xs text-stone-500 file:mr-3 file:py-2 file:px-3 file:rounded-lg file:border-0 file:text-xs file:font-bold file:bg-[#0B2B20] file:text-white hover:file:bg-[#164E3D] cursor-pointer"
-                    />
-                    {idProofFile && (
-                      <span className="text-[11px] text-emerald-800 font-bold bg-emerald-50 px-2 py-1 rounded">
-                        ✓ {idProofFile}
-                      </span>
-                    )}
-                  </div>
-                </div>
-
                 {/* SPECIAL REQUESTS */}
                 <div>
                   <label className="block text-[11px] font-bold text-stone-700 mb-1">Special Preferences / Requests</label>
@@ -1018,100 +941,23 @@ export default function Home() {
             {/* CHECKOUT PROCEED BUTTON */}
             <div className="pt-6 border-t border-[#E5DFD5] mt-6 space-y-3">
               <button
+                disabled={starting}
                 onClick={handleProceedToPayment}
                 className="w-full bg-gradient-to-r from-[#0B2B20] to-[#184E38] hover:from-[#164E3D] hover:to-[#0B2B20] text-white font-bold py-3.5 px-4 rounded-xl shadow-lg transition flex items-center justify-center gap-2 hover:shadow-xl"
               >
-                <span>Proceed to Pay Advance (₹{advanceToken.toLocaleString('en-IN')}) via Razorpay</span>
+                <span>{starting ? 'Preparing secure checkout…' : `Test the ₹${advanceToken.toLocaleString('en-IN')} advance with Stripe`}</span>
               </button>
               <div className="text-[11px] text-center text-stone-500 space-y-0.5">
-                <p>🔒 100% Encrypted UPI, Cards & NetBanking via Razorpay.</p>
-                <p>⚡ Instant confirmation slip sent automatically to your WhatsApp.</p>
+                <p>Test only. No real charge or room reservation.</p>
+                {checkoutError && <p role="alert" className="text-red-700">{checkoutError}</p>}
               </div>
             </div>
           </div>
         </div>
       )}
 
-      {/* 8. RAZORPAY PAYMENT GATEWAY MODAL */}
-      {isRazorpayOpen && (
-        <RazorpayModal
-          amount={advanceToken}
-          guestName={guestName}
-          guestPhone={guestPhone}
-          onSuccess={handlePaymentSuccess}
-          onClose={() => setIsRazorpayOpen(false)}
-        />
-      )}
-
-      {/* 9. CONFIRMATION MODAL & TAX INVOICE TRIGGER */}
-      {confirmedBooking && (
-        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-3xl w-full max-w-md p-8 text-center space-y-5 shadow-2xl border border-emerald-200">
-            <div className="w-16 h-16 bg-emerald-100 text-emerald-800 text-3xl rounded-full flex items-center justify-center mx-auto shadow-inner">
-              ✓
-            </div>
-            <div>
-              <span className="text-xs uppercase tracking-widest font-bold text-[#C59B27]">Reservation Confirmed</span>
-              <h3 className="font-serif font-bold text-2xl text-[#0B2B20] mt-1">Har Har Mahadev!</h3>
-              <p className="text-xs text-stone-600 mt-1">
-                Your reservation at <strong>Jageshwar Dham Retreat</strong> is locked.
-              </p>
-            </div>
-
-            <div className="bg-[#FAF8F5] p-4 rounded-2xl border border-[#EAE5DE] text-left text-xs space-y-2">
-              <div className="flex justify-between">
-                <span className="text-stone-500">Booking ID:</span>
-                <span className="font-bold text-stone-900">{confirmedBooking.bookingNumber}</span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-stone-500">Guest:</span>
-                <span className="font-bold text-stone-900">{confirmedBooking.guestName}</span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-stone-500">Dates:</span>
-                <span className="font-semibold text-stone-800">{confirmedBooking.checkIn} to {confirmedBooking.checkOut}</span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-stone-500">Advance Paid:</span>
-                <span className="font-bold text-emerald-800">₹{confirmedBooking.advancePaid.toLocaleString('en-IN')} (Razorpay)</span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-stone-500">Balance at Check-In:</span>
-                <span className="font-bold text-stone-900">₹{confirmedBooking.balanceDue.toLocaleString('en-IN')}</span>
-              </div>
-            </div>
-
-            <div className="space-y-3 pt-2">
-              <button
-                onClick={() => {
-                  // Keep confirmedBooking active and show Invoice
-                }}
-                className="w-full bg-[#0B2B20] hover:bg-[#164E3D] text-white font-bold py-3 px-4 rounded-xl shadow-md transition text-xs flex items-center justify-center gap-2"
-              >
-                <span>📄 View & Print Official Tax Invoice</span>
-              </button>
-
-              <button
-                onClick={() => {
-                  setConfirmedBookingId(null);
-                  setIsCheckoutDrawerOpen(false);
-                }}
-                className="w-full text-xs font-semibold text-stone-500 hover:text-stone-800 py-1"
-              >
-                Done / Back to Home
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* 10. INVOICE MODAL WHEN BOOKING IS VIEWED */}
-      {confirmedBooking && (
-        <InvoiceModal
-          booking={confirmedBooking}
-          onClose={() => setConfirmedBookingId(null)}
-        />
-      )}
+      {/* Stripe test checkout */}
+      {checkoutUrl && <div className="fixed inset-0 z-[100] grid place-items-center bg-black/60 p-4"><section role="dialog" aria-modal="true" aria-label="Test checkout" className="max-w-md space-y-4 rounded-2xl bg-white p-6"><h2 className="font-serif text-2xl font-bold">Your test checkout is ready</h2><p>Use test card <strong>4242 4242 4242 4242</strong>, a future expiry and any three-digit CVC. No money is charged or room reserved.</p><a autoFocus href={checkoutUrl} target="_blank" rel="noopener noreferrer" className="block rounded-lg bg-emerald-950 p-3 text-center font-bold text-white">Open Stripe test checkout in a new tab</a><button onClick={()=>setCheckoutUrl('')} className="underline">Back to booking</button></section></div>}
 
       {/* 11. GENERAL ENQUIRY MODAL */}
       {isEnquiryOpen && (
